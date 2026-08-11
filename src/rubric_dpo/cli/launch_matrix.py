@@ -89,15 +89,7 @@ def _run_process(command: list[str], gpus: str, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpus
-    # On the shared 8x H100 host, NCCL NVLS collectives are healthy during
-    # training but reproducibly fail in torch.distributed.checkpoint's FSDP
-    # scatter path.  Keep smaller topologies unchanged and respect an explicit
-    # caller override for future NCCL/driver upgrades.
-    if len([gpu for gpu in gpus.split(",") if gpu.strip()]) == 8:
-        env.setdefault("NCCL_NVLS_ENABLE", "0")
     with log_path.open("a", encoding="utf-8") as log:
-        if "NCCL_NVLS_ENABLE" in env:
-            log.write(f"NCCL_NVLS_ENABLE={env['NCCL_NVLS_ENABLE']}\n")
         log.write("COMMAND " + " ".join(command) + "\n")
         log.flush()
         subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
