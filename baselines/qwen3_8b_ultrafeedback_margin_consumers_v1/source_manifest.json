@@ -1,0 +1,17 @@
+{
+  "baseline_id": "qwen3_8b_ultrafeedback_margin_consumers_v1",
+  "identity": "source/formula-aligned controlled reproduction on Qwen3-8B + UltraFeedback",
+  "sources": {
+    "dpo": {"repository": "https://github.com/eric-mitchell/direct-preference-optimization", "commit": "f8b8c0f49dc92a430bae41585f9d467d3618fe2f"},
+    "mmpo": {"repository": "https://github.com/kykim0/margin-matching-pref-opt", "commit": "ef3a91dfe1707ce09d4442b0a13285f87f9ae636"},
+    "odpo": {"repository": "https://github.com/rycolab/odpo", "commit": "6152f67c8cddc223ca5affc7e261d967568068ee"},
+    "scaled_dpo": {"paper": "arXiv:2410.01257v2", "section": "5.2 and Table 4", "dedicated_official_trainer": false}
+  },
+  "deviations": [
+    "Qwen3-8B replaces each source paper backbone",
+    "audited UltraFeedback four-aspect gaps replace method-native preprocessing",
+    "TRL 0.19.1 and a durable pair-keyed reference cache replace incompatible legacy stacks",
+    "Scaled-DPO normalized-gap transfer uses q95-normalized gaps rather than HelpSteer2 strengths {1,2,3}",
+    "ODPO uses the author log-gap formula with the normalized UltraFeedback gap as its external positive gap"
+  ]
+}

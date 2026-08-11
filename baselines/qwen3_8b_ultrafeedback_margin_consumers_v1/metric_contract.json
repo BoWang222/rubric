@@ -1,0 +1,15 @@
+{
+  "selection_split": "validation",
+  "selection_primary": "hard-preference NLL",
+  "selection_tiebreakers": ["implicit-reward preference accuracy", "smaller hyperparameter"],
+  "test_is_hidden_until_selection_complete": true,
+  "local_metrics": [
+    "hard-preference NLL",
+    "implicit-reward preference accuracy",
+    "chosen/rejected implicit reward",
+    "reward margin",
+    "policy-reference KL diagnostic",
+    "response token and character length"
+  ],
+  "external_judges": "deferred; local outputs are diagnostics, not official leaderboard scores"
+}

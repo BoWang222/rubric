@@ -1,0 +1,20 @@
+{
+  "status": "failed",
+  "probe": "two_gpu_full_parameter_fsdp1",
+  "configuration": {
+    "gpu_count": 2,
+    "per_device_batch_size": 1,
+    "gradient_accumulation_steps": 32,
+    "effective_batch_size": 64
+  },
+  "observed_at_optimizer_step": 2,
+  "observed_peak_device_used_memory_gb": 81.059,
+  "measurement_source": "nvidia-smi",
+  "requires": {
+    "peak_reserved_gb_lte": 65.0,
+    "two_job_combined_to_four_gpu_throughput_gte": 0.9
+  },
+  "reason": "Observed device memory already exceeded the pre-registered safety threshold; the probe was terminated before checkpointing.",
+  "fallback": "four_gpu_sequential",
+  "research_configuration_changed": false
+}

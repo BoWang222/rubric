@@ -1,0 +1,22 @@
+baseline_id: qwen3_8b_ultrafeedback_margin_consumers_v1
+beta: 0.01
+epochs: 1
+effective_batch_size: 64
+optimizer: adamw_torch_fused
+weight_decay: 0.0
+scheduler: cosine
+warmup_ratio: 0.3
+max_grad_norm: 1.0
+bf16: true
+tf32: true
+flash_attention: flash_attention_2
+gradient_checkpointing: true
+max_prompt_length: 1024
+max_completion_length: 1024
+max_length: 2048
+seeds: [13, 42, 100]
+learning_rate_grid: [5.0e-7, 1.0e-6]
+gamma_grid: [1.0, 2.2, 4.0]
+alpha_grid: [0.1, 0.5, 1.0]
+full_train_steps: 566
+mid_checkpoint_step: 283
