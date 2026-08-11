@@ -1,8 +1,9 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import json
 
-from rubric_dpo.cli.launch_matrix import Task, _finalize_pilot, _latest_checkpoint
+from rubric_dpo.cli.launch_matrix import Task, _finalize_pilot, _latest_checkpoint, _train_command
 
 
 def test_latest_checkpoint_is_bounded_by_declared_final_step(tmp_path: Path) -> None:
@@ -17,6 +18,23 @@ def test_latest_checkpoint_is_bounded_by_declared_final_step(tmp_path: Path) -> 
 def test_latest_checkpoint_is_none_for_fresh_run(tmp_path: Path) -> None:
     task = Task("dpo", tmp_path / "fresh", 1e-6, max_steps=16)
     assert _latest_checkpoint(task) is None
+
+
+def test_eight_gpu_command_preserves_effective_batch_64(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        root=tmp_path,
+        model=tmp_path / "model",
+        dataset_dir=tmp_path / "dataset",
+        reference_cache=tmp_path / "cache",
+        two_gpu_offload=False,
+    )
+    task = Task("dpo", tmp_path / "run", 1e-6)
+    command = _train_command(args, task, gpu_count=8, port=29500)
+    assert str(tmp_path / "configs/accelerate/fsdp_8gpu.yaml") in command
+    per_device = command.index("--per-device-batch-size")
+    accumulation = command.index("--gradient-accumulation-steps")
+    assert command[per_device + 1] == "2"
+    assert command[accumulation + 1] == "4"
 
 
 def test_pilot_finalization_keeps_metrics_and_removes_recovery(tmp_path: Path) -> None:

@@ -34,7 +34,12 @@ class Task:
 def _train_command(args, task: Task, gpu_count: int, port: int, stop_after: int | None = None, resume: Path | None = None) -> list[str]:
     config_name = "fsdp_2gpu_cpu_offload.yaml" if gpu_count == 2 and args.two_gpu_offload else f"fsdp_{gpu_count}gpu.yaml"
     fsdp = args.root / "configs/accelerate" / config_name
-    per_device, accumulation = (2, 8) if gpu_count == 4 else (1, 32)
+    batch_contract = {
+        2: (1, 32),
+        4: (2, 8),
+        8: (2, 4),
+    }
+    per_device, accumulation = batch_contract[gpu_count]
     command = [
         str(Path(sys.executable).with_name("accelerate")), "launch", "--config_file", str(fsdp), "--main_process_port", str(port),
         "-m", "rubric_dpo.cli.train",
@@ -403,7 +408,7 @@ def status(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gate-aware four-GPU baseline scheduler")
+    parser = argparse.ArgumentParser(description="Gate-aware multi-GPU baseline scheduler")
     parser.add_argument("phase", choices=("smoke", "probe", "pilots", "full", "status"))
     parser.add_argument("--root", type=Path, default=Path("/root/autodl-tmp/rubric"))
     parser.add_argument("--model", type=Path)
@@ -411,8 +416,8 @@ def main() -> None:
     parser.add_argument("--reference-cache", type=Path)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--parallel", choices=("auto", "off"), default="auto")
-    parser.add_argument("--gpu-count", type=int, choices=(2, 4), default=4)
-    parser.add_argument("--gpu-ids", default="0,1,2,3")
+    parser.add_argument("--gpu-count", type=int, choices=(2, 4, 8), default=4)
+    parser.add_argument("--gpu-ids", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--two-gpu-offload", action="store_true")
     parser.add_argument("--force-probe", action="store_true", help="repeat an existing two-GPU safety probe")
     args = parser.parse_args()
