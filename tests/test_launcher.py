@@ -1,9 +1,22 @@
+import argparse
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import json
+import pytest
 
-from rubric_dpo.cli.launch_matrix import Task, _finalize_pilot, _latest_checkpoint, _train_command
+from rubric_dpo.cli.launch_matrix import Task, _finalize_pilot, _latest_checkpoint, _parse_seeds, _train_command
+
+
+def test_parse_single_and_multiple_full_run_seeds() -> None:
+    assert _parse_seeds("42") == (42,)
+    assert _parse_seeds("13,42,100") == (13, 42, 100)
+
+
+@pytest.mark.parametrize("value", ["", "42,42", "-1", "seed42"])
+def test_reject_invalid_full_run_seeds(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_seeds(value)
 
 
 def test_latest_checkpoint_is_bounded_by_declared_final_step(tmp_path: Path) -> None:

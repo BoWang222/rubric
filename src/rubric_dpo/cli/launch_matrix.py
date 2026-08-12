@@ -20,6 +20,20 @@ PILOT_STEPS = 64
 FIXED_MMPO_GAMMA = 2.2
 
 
+def _parse_seeds(value: str) -> tuple[int, ...]:
+    try:
+        seeds = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--seeds must be a comma-separated list of integers") from error
+    if not seeds:
+        raise argparse.ArgumentTypeError("--seeds must contain at least one integer")
+    if any(seed < 0 for seed in seeds):
+        raise argparse.ArgumentTypeError("--seeds must contain non-negative integers")
+    if len(set(seeds)) != len(seeds):
+        raise argparse.ArgumentTypeError("--seeds must not contain duplicates")
+    return seeds
+
+
 @dataclass(frozen=True)
 class Task:
     variant: str
@@ -386,7 +400,7 @@ def run_full(args) -> None:
         raise RuntimeError("baseline smoke gate is not verified")
     selection = json.loads(selection_path.read_text())
     tasks = []
-    for seed in (13, 42, 100):
+    for seed in args.seeds:
         for variant in VARIANTS:
             tasks.append(Task(
                 variant, args.output_root / "full" / variant / f"seed_{seed}",
@@ -429,6 +443,7 @@ def main() -> None:
     parser.add_argument("--parallel", choices=("auto", "off"), default="auto")
     parser.add_argument("--gpu-count", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--gpu-ids", default="0,1,2,3,4,5,6,7")
+    parser.add_argument("--seeds", type=_parse_seeds, default=(13, 42, 100), help="comma-separated full-run seeds")
     parser.add_argument("--two-gpu-offload", action="store_true")
     parser.add_argument("--two-gpu-no-offload", action="store_true")
     parser.add_argument("--force-probe", action="store_true", help="repeat an existing two-GPU safety probe")

@@ -203,7 +203,7 @@ $$
 - 初始训练预算：1 epoch；effective batch size `64`。显存不足时只调整 micro-batch 与 gradient accumulation，不改变 effective batch。
 - ODPO / Scaled-DPO normalized-gap transfer 的 loss-DRO extension 是例外中的固定实现合同：`B_DRO=8` 是构造 adversarial distribution 的 inner batch，不得因显存调整；再累积 8 个 inner batches 得 effective batch 64。
 - full-parameter learning rate 先在 `{5e-7, 1e-6}` 中用统一 validation budget 选择一次；若 pilot 显示两端均不合适，只能在所有比较行共享的同等预算内扩展一次网格。
-- 主 seeds：`13, 42, 100`。
+- 主 seeds：`13, 42, 100`。执行分两阶段：先用 seed `42` 跑完四个 baseline 并完成本地 test；资源允许后再补 `13/100`。第一阶段只是可比的单 seed 证据，不报种子方差，不冒充最终三 seed 主表。
 
 LoRA 只用于代码 smoke、低预算开发或可选的参数高效 ablation，不作为默认主表。若实际可用资源在 `max_length=2048` 的 full-parameter smoke 中仍无法通过，才可把**整个比较组**统一降级为 LoRA，并将其单独成表；不得让 baseline 与 ours 使用不同的参数更新方式。
 
