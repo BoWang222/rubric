@@ -108,19 +108,24 @@ def main() -> None:
             "checkpoint_preserved": fsdp_dir.exists(),
         })
         raise
-    atomic_json(run_dir / "finalization.json", {
+    finalization = {
         "status": "verified", "final_step": args.final_step, "merged_model": str(merged),
         "model_checksums": checksums, "metrics_sha256": sha256_file(metrics_path),
         "merged_weight_bytes_before_cast": merged_weight_bytes_before_cast,
         "total_weight_bytes": total_weight_bytes, "portable_dtype": "bfloat16",
-        "recovery_deleted": bool(args.delete_recovery),
-    })
+        "recovery_deleted": False,
+    }
+    atomic_json(run_dir / "finalization.json", finalization)
     if failure_path.exists():
         failure_path.unlink()
     if args.delete_recovery:
         for path in sorted(run_dir.glob("checkpoint-*")):
             if path.is_dir():
                 shutil.rmtree(path)
+        if any(path.is_dir() for path in run_dir.glob("checkpoint-*")):
+            raise RuntimeError("recovery cleanup did not remove every checkpoint directory")
+        finalization["recovery_deleted"] = True
+        atomic_json(run_dir / "finalization.json", finalization)
     print(json.dumps(json.loads((run_dir / "finalization.json").read_text()), indent=2))
 
 

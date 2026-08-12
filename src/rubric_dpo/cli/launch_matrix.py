@@ -151,7 +151,8 @@ def _finalize(task: Task) -> None:
     finalization = task.output / "finalization.json"
     if finalization.exists():
         state = json.loads(finalization.read_text())
-        if state.get("status") == "verified" and state.get("recovery_deleted") is True:
+        recovery_dirs = [path for path in task.output.glob("checkpoint-*") if path.is_dir()]
+        if state.get("status") == "verified" and state.get("recovery_deleted") is True and not recovery_dirs:
             return
     subprocess.run([
         sys.executable, "-m", "rubric_dpo.cli.finalize_run",
