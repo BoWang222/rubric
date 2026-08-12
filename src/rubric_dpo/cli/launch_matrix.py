@@ -127,7 +127,6 @@ def _run_process(command: list[str], gpus: str, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpus
-    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     env.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
     env.setdefault("NCCL_DEBUG", "WARN")
     with log_path.open("a", encoding="utf-8") as log:
