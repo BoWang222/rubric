@@ -39,7 +39,7 @@ def _train_command(args, task: Task, gpu_count: int, port: int, stop_after: int 
     config_name = "fsdp_2gpu_cpu_offload.yaml" if gpu_count == 2 and args.two_gpu_offload else f"fsdp_{gpu_count}gpu.yaml"
     fsdp = args.root / "configs/accelerate" / config_name
     batch_contract = {
-        2: (2, 16),
+        2: (1, 32),
         4: (2, 8),
         8: (2, 4),
     }
@@ -429,6 +429,7 @@ def main() -> None:
     parser.add_argument("--gpu-count", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--gpu-ids", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--two-gpu-offload", action="store_true")
+    parser.add_argument("--two-gpu-no-offload", action="store_true")
     parser.add_argument("--force-probe", action="store_true", help="repeat an existing two-GPU safety probe")
     args = parser.parse_args()
     args.root = args.root.resolve()
@@ -436,8 +437,11 @@ def main() -> None:
     args.dataset_dir = args.dataset_dir or args.root / "data/processed/ultrafeedback/v2/tokens_qwen3_8b_non_thinking"
     args.reference_cache = args.reference_cache or args.root / "data/cache/ultrafeedback_qwen3_8b_ref_v1"
     args.output_root = args.output_root or args.root / "runs/baselines/qwen3_8b_ultrafeedback_margin_consumers_v1"
-    if args.gpu_count == 2 and args.phase in {"smoke", "pilots", "full"} and not args.two_gpu_offload:
-        parser.error("two-GPU full-parameter training requires --two-gpu-offload and a successful smoke")
+    if args.two_gpu_offload and args.two_gpu_no_offload:
+        parser.error("choose exactly one two-GPU memory policy")
+    if args.gpu_count == 2 and args.phase in {"smoke", "pilots", "full"}:
+        if not (args.two_gpu_offload or args.two_gpu_no_offload):
+            parser.error("two-GPU training requires an explicit --two-gpu-offload or --two-gpu-no-offload policy")
     {"smoke": run_smoke, "probe": run_probe, "pilots": run_pilots, "full": run_full, "status": status}[args.phase](args)
 
 

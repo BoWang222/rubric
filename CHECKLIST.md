@@ -115,7 +115,7 @@
 
 - [x] 1024-pair baseline smoke：DPO/MMPO/ODPO/Scaled-DPO 全部 16 steps 通过；DPO step-8 resume 通过；状态 `verified-for-controlled-UF`
 - [ ] 64-step development pilots：DPO LR `{5e-7,1e-6}` → ODPO alpha `{0.1,0.5,1.0}`，只用 validation 冻结全局配置；MMPO gamma 按作者8B UltraFeedback recipe固定为 `2.2`
-- [ ] NUS 服务器合规双卡配置：`per_device=2`、`gradient_accumulation=16`、effective batch `64`、FSDP CPU offload；先通过2-step显存/吞吐探测
+- [x] NUS 服务器合规双卡 pilot 配置：`per_device=1`、`gradient_accumulation=32`、effective batch `64`、FSDP no-offload；8-step实测 `13.7s/step`、peak reserved `77.37GB/GPU`。`per_device=2` + CPU offload 实测更慢（`67.1s/step`），不采用
 - [ ] 四 baseline × seeds 13/42/100 的 566-step 全量 UltraFeedback 训练与本地评测
 - [ ] Gate 0 通过后，在 UltraFeedback development split 仅用 uniform robust 网格选择一次全局 `rho`；立即冻结，ours/其他数据/consumer 不重调
 - [ ] 单 seed：Vanilla DPO

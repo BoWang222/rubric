@@ -212,7 +212,7 @@ LoRA 只用于代码 smoke、低预算开发或可选的参数高效 ablation，
 - 在 UltraFeedback development split 上，使用 `MMPO + uniform robust (s=1)` 从预注册网格选择一个 `rho`。
 - `rho` 一旦选定，立即冻结；ours 不重新调 `rho`。
 - 不设置 `rho_label/rho_loss` 两套预算。第 2.4/2.5 节先把两类 KL 分别除以其冻结上界，使同一个 `rho` 表示 `[0,1]` divergence budget；consumer 间仍只比较各自的 `ours - uniform`，不比较 adversarial shift 的绝对大小。
-- UltraFeedback MMPO baseline 的 `gamma` 固定为作者8B recipe的 `2.2`，不再消耗本地 pilot 预算重选；automatic-rubric producer 之间必须共享同一个 `gamma` 和 margin normalization。UltraFeedback development pilot 统一改为64 optimizer steps：仅搜索 DPO LR `{5e-7,1e-6}` 与 ODPO alpha `{0.1,0.5,1.0}`。NUS 共享节点限制同时最多2 GPU，因此合规运行配置为 `per_device=2`、`gradient_accumulation=16`、effective batch `64`。
+- UltraFeedback MMPO baseline 的 `gamma` 固定为作者8B recipe的 `2.2`，不再消耗本地 pilot 预算重选；automatic-rubric producer 之间必须共享同一个 `gamma` 和 margin normalization。UltraFeedback development pilot 统一改为64 optimizer steps：仅搜索 DPO LR `{5e-7,1e-6}` 与 ODPO alpha `{0.1,0.5,1.0}`。NUS 共享节点限制同时最多2 GPU。实测后 pilot 冻结为 FSDP no-offload、`per_device=1`、`gradient_accumulation=32`、effective batch `64`；8-step peak reserved `77.37GB/GPU`、吞吐 `13.7s/step`。CPU offload 配置作为 OOM fallback，不用于主 pilot。
 - ODPO 的 offset scale、Scaled-DPO normalized-gap transfer 的 weight normalization、MMPO 的 target mapping各自允许同等数量的 validation trials，但 ours 与其对应 nominal/uniform 行共享这些值。
 - 所有方法共享 optimizer、scheduler、epoch、batch、max length、seed 和 checkpoint-selection rule。
 
