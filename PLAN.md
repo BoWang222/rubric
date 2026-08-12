@@ -640,22 +640,24 @@ artifacts/experiment/<run_id>/
 ## 15. 资源自适应的执行顺序与预算控制
 
 1. 冻结 environment、repos、data revisions 与全部 prompt splits；首先从 WildChecklists 留出并 hash 固定 500-prompt common calibration bank。
-2. 实现 loss 单元测试；`rho==0` 走显式 nominal branch，`rho>0` 再测 dual。用 UltraFeedback 1k 与一个 32-prompt calibration pilot 运行 DPO/MMPO/uniform/令 `s=1` 的 ours smoke；Gate 0 仅禁止在此前生成**全量自动-rubric corpus**，不禁止这个最小 pilot。
-3. Gate 0 通过后，在 UltraFeedback development split 上仅用 `MMPO + uniform robust (s=1)` 从预注册网格选择一次 `rho`，立即冻结并写入全局 config；ours 和其他数据/consumer 不再重调。
-4. 依次生成 shared Qwen2.5-32B reference bank、RRD Qwen2.5-1.5B weak bank、WildChat common response bank、独立 `M_induction=8` Online induction bank，以及需要的 native/probe response banks。所有 banks 分离并保存 hash；正式 `M` 在 pilot 后全局冻结。
-5. 对 UltraFeedback/HelpSteer2 global rubrics 在共同 500-prompt calibration bank 上计算一个 `s`；对 WildChecklists 实际进入训练/验证的每个 exact requirements checklist，在其来源 prompt 的 probe responses 上计算 `s(C_i)`。共同 500 prompts 只用于跨方法 diagnostic，不再生成一个错误的 `s_WC` 常数。
-6. 在独立 induction split 上按第 9.3 节生成 `C0(x)`，用第 4 步的 induction-only candidate bank 完成一轮 nominal-MMPO warm-up，并冻结 OnlineRubrics-local 的 current/control policies、Qwen2.5-32B extractor、decoding 与 dedup 配置；不得使用 common validation/evaluation labels。
-7. 在 WildChecklists 500-prompt diagnostic bank 上生成六个 automatic producers 的 rubrics并检查 `s(C)` 分布/parser/scorer；Online 使用逐 prompt `dedup(C0(x) union Ce(x))`，RRD 使用冻结 references、本地 actors 与 common-binarized-WU。
-8. 在 WildChat common train/validation 上生成并冻结六套 prompt-specific/global rubrics；canonicalize 后用共同 response bank 同时计算每个 `s(C_i)`、criterion scores、pairs 和 margins。只有 exact global/repeated rubric 才共享缓存。完成 Gate 1/3 后，所有数据与 rubric-level `s(C)` 才可用于训练。
-9. UltraFeedback、WildChecklists、HelpSteer2 全矩阵单 seed，并用独立 human signals 完成 validity gate；1k smoke 已在第 2 步完成，不重复。
-10. 只把通过 gate 的 native/structured-feedback DPO/MMPO 主表行提升到 3 seeds。
-11. 六个 automatic-rubric 的 producer-specific DPO 与 MMPO nominal/uniform/ours sweep 单 seed。
-12. 六-system joint MMPO：nominal/uniform/ours/shuffled/rank-reversed。
-13. ODPO / Scaled-DPO normalized-gap transfer 的 loss-DRO extensions 先在九个 systems 跑单 seed；预注册 UltraFeedback、WildChecklists、Rubric-ARM、frozen EvoLM 升 3 seeds。
-14. 九-system 的 DPO/MMPO nominal/uniform/ours 主表与 joint table 提升到 3 seeds；ODPO / Scaled-DPO normalized-gap transfer 只将预注册四-system transfer 表提升到 3 seeds，其余保留单-seed appendix。
-15. 完成 ablations、JudgmentBench premise diagnostic、Prometheus-vs-reference-free scorer sensitivity 与 specialized evaluation。
-16. 资源允许且 offline 结论成立时运行 OnlineRubrics-local 2–3 round extension；faithful API 只做 200-prompt sensitivity。
-17. 冻结 checkpoints，最后运行五个通用 benchmarks。
+2. baseline loss/source-parity 单测、UltraFeedback 1k DPO/MMPO/ODPO/Scaled-DPO smoke、reference cache 和 pilots 已完成，不重复。Robust `rho==0`、`s=1`、dual/explicit-inner 测试保留到第 5 步，不与 baseline 训练交叉改代码。
+3. 先完成 UltraFeedback seed-42 四 baseline 及 official-test 本地评测；当前 DPO 首次正式运行在 step-283 FSDP checkpoint save 处失败，因无 trusted checkpoint 须在 checkpoint 通路修复后从 step 0 重启。不重做 data/cache/smoke/pilot。
+4. baseline 本地结果冻结后，先生成 UltraFeedback 500-prompt×`M=16` calibration bank，用冻结 RubricARROW scorer 计算 `s_UF` 与 bootstrap CI。
+5. 随后才实现 KL 与 Wasserstein-W1 robust backends；W1 ground cost、rho normalization、solver 和选择规则必须先写回方法合同。通过 `rho=0`、`s=1` 和 explicit-inner gates 后，在 UltraFeedback development split 上仅用 uniform control 选择一次全局 `rho`。
+6. 依次生成 shared Qwen2.5-32B reference bank、RRD Qwen2.5-1.5B weak bank、WildChat common response bank、独立 `M_induction=8` Online induction bank，以及需要的 native/probe response banks。所有 banks 分离并保存 hash；正式 `M` 在 pilot 后全局冻结。
+7. 对 HelpSteer2 global rubric 在共同 500-prompt calibration bank 上计算一个 `s`；对 WildChecklists 实际进入训练/验证的每个 exact requirements checklist，在其来源 prompt 的 probe responses 上计算 `s(C_i)`。共同 500 prompts 只用于跨方法 diagnostic，不再生成一个错误的 `s_WC` 常数。
+8. 在独立 induction split 上按第 9.3 节生成 `C0(x)`，用 induction-only candidate bank 完成一轮 nominal-MMPO warm-up，并冻结 OnlineRubrics-local 的 current/control policies、Qwen2.5-32B extractor、decoding 与 dedup 配置；不得使用 common validation/evaluation labels。
+9. 在 WildChecklists 500-prompt diagnostic bank 上生成六个 automatic producers 的 rubrics并检查 `s(C)` 分布/parser/scorer；Online 使用逐 prompt `dedup(C0(x) union Ce(x))`，RRD 使用冻结 references、本地 actors 与 common-binarized-WU。
+10. 在 WildChat common train/validation 上生成并冻结六套 prompt-specific/global rubrics；canonicalize 后用共同 response bank 同时计算每个 `s(C_i)`、criterion scores、pairs 和 margins。只有 exact global/repeated rubric 才共享缓存。完成 Gate 1/3 后，所有数据与 rubric-level `s(C)` 才可用于训练。
+11. UltraFeedback、WildChecklists、HelpSteer2 全矩阵单 seed，并用独立 human signals 完成 validity gate；1k smoke 已在第 2 步完成，不重复。
+12. 只把通过 gate 的 native/structured-feedback DPO/MMPO 主表行提升到 3 seeds。
+13. 六个 automatic-rubric 的 producer-specific DPO 与 MMPO nominal/uniform/ours sweep 单 seed。
+14. 六-system joint MMPO：nominal/uniform/ours/shuffled/rank-reversed。
+15. ODPO / Scaled-DPO normalized-gap transfer 的 loss-DRO extensions 先在九个 systems 跑单 seed；预注册 UltraFeedback、WildChecklists、Rubric-ARM、frozen EvoLM 升 3 seeds。
+16. 九-system 的 DPO/MMPO nominal/uniform/ours 主表与 joint table 提升到 3 seeds；ODPO / Scaled-DPO normalized-gap transfer 只将预注册四-system transfer 表提升到 3 seeds，其余保留单-seed appendix。
+17. 完成 ablations、JudgmentBench premise diagnostic、Prometheus-vs-reference-free scorer sensitivity 与 specialized evaluation。
+18. 资源允许且 offline 结论成立时运行 OnlineRubrics-local 2–3 round extension；faithful API 只做 200-prompt sensitivity。
+19. 冻结 checkpoints，最后运行五个通用 benchmarks。
 
 安全的节省方式：缓存数据生成与 reference log-prob、FSDP full-shard/ZeRO-3、BF16、FlashAttention、gradient checkpointing、单 seed 筛选后再升 3 seeds。LoRA 仅用于 smoke 或单独的参数高效 ablation。不能通过改变数据量、epoch、evaluation 或只给 ours 更多调参预算来节省成本。
 
@@ -681,3 +683,4 @@ artifacts/experiment/<run_id>/
 | 2026-08-11 | final source/executability pass：预留 WildChecklists 500 prompts；冻结 reference-free RubricARROW 主 scorer/parser、Prometheus sensitivity、RRD local actors与 Online induction bank；定义 rank-reversed-s；将 `rho` 冻结放入执行顺序 | 解决 prompt-specific requirements、reference 自比较门控、WU 二值输入与 preflight 依赖链 | scorer/parser/provenance 合同继续有效；“九个 system-level `s_g`”口径已由下一行取代 |
 | 2026-08-11 | rubric-instance correction：rubric 明确定义为 criterion set，不含 prompt/producer；global rubric 共享一个 `s`，prompt-specific rubric 逐 exact criterion set 计算并缓存；加权 KL 改为逐 rubric；删除单张 H100 硬件合同 | 用户指出 automatic producers 通常逐 prompt 生成 rubric，不能压成一个 system-level `s` | WildChecklists/OpenRubrics/ARM/Online/RRD/EvoLM 现在使用 rubric-level `s(C_i)`；相同 rubric 共享值，资源配置运行时记录而非预先写死 |
 | 2026-08-11 | 将主表训练从 LoRA 更正为 `Qwen/Qwen3-8B` BF16 full-parameter fine-tuning，使用 FSDP full-shard/ZeRO-3 与 reference-logp cache；LoRA 降为 smoke/独立 ablation | 用户明确主模型为 Qwen3-8B；原始 DPO、ODPO、MMPO 7B/8B 与 RLCF 官方训练入口也均不是 LoRA-only | 所有 nominal/uniform/ours 行共享同一 Qwen3-8B revision、non-thinking chat-template 和全参训练合同；避免模型身份或 LoRA 容量约束混淆 rubric robustness 效果 |
+| 2026-08-12 | 完成 NUS 现状审计；UltraFeedback smoke/pilots 可信，seed-42 DPO 在 step-283 checkpoint save 失败；执行顺序改为 baseline → `s_UF` → KL/W1 → 其他 native/automatic tracks | 正式 run 的 manifest 与真实进程冲突，且用户要求先完成 baseline、再计算 `s_UF`、最后接 robust 方法 | 不改 baseline 超参/数据/预算；失败 run 不计为结果，其他数据 raw assets 复用但必须另做 production gates |
