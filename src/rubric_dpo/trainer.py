@@ -126,7 +126,7 @@ class BaselineDPOTrainer(DPOTrainer):
             metrics[f"{prefix}mmpo/p0_max"] = gathered_p0.max().item()
             metrics[f"{prefix}mmpo/target_clipping_count"] = (
                 (gathered_p0 <= self.target_epsilon) | (gathered_p0 >= 1.0 - self.target_epsilon)
-            ).sum().item()
+            ).sum().float().item()
         elif self.baseline_variant == "odpo_loggap":
             offset = self.alpha * torch.log(batch["margin_normalized"])
             gathered_offset = gather(offset)
