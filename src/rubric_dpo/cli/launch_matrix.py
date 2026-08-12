@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from rubric_dpo.constants import VARIANTS
+from rubric_dpo.checkpointing import validate_local_checkpoint
 from rubric_dpo.utils import atomic_json, sha256_file
 
 PILOT_STEPS = 64
@@ -32,6 +33,18 @@ def _parse_seeds(value: str) -> tuple[int, ...]:
     if len(set(seeds)) != len(seeds):
         raise argparse.ArgumentTypeError("--seeds must not contain duplicates")
     return seeds
+
+
+def _parse_variants(value: str) -> tuple[str, ...]:
+    variants = tuple(item.strip() for item in value.split(",") if item.strip())
+    if not variants:
+        raise argparse.ArgumentTypeError("--variants must contain at least one baseline variant")
+    unknown = set(variants) - set(VARIANTS)
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown baseline variants: {sorted(unknown)}")
+    if len(set(variants)) != len(variants):
+        raise argparse.ArgumentTypeError("--variants must not contain duplicates")
+    return variants
 
 
 @dataclass(frozen=True)
@@ -102,6 +115,10 @@ def _latest_checkpoint(task: Task) -> Path | None:
     for path in task.output.glob("checkpoint-*"):
         match = re.fullmatch(r"checkpoint-(\d+)", path.name)
         if match and path.is_dir() and int(match.group(1)) <= task.max_steps:
+            try:
+                validate_local_checkpoint(path, task.output)
+            except (FileNotFoundError, ValueError):
+                continue
             candidates.append((int(match.group(1)), path))
     return max(candidates, default=(0, None), key=lambda item: item[0])[1]
 
@@ -110,6 +127,9 @@ def _run_process(command: list[str], gpus: str, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpus
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    env.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    env.setdefault("NCCL_DEBUG", "WARN")
     with log_path.open("a", encoding="utf-8") as log:
         log.write("COMMAND " + " ".join(command) + "\n")
         log.flush()
@@ -133,13 +153,52 @@ def _run_task(args, task: Task, gpu_count: int, gpus: str, port: int, resume_tes
         _enrich_end_to_end_metrics(task, resume_test)
         return
     log = task.output / "launcher.log"
-    if resume_test and not (task.output / "checkpoint-8").exists():
-        _run_process(_train_command(args, task, gpu_count, port, stop_after=8), gpus, log)
-    resume = task.output / "checkpoint-8" if resume_test else _latest_checkpoint(task)
-    _run_process(_train_command(args, task, gpu_count, port, resume=resume), gpus, log)
+    try:
+        checkpoint8 = task.output / "checkpoint-8"
+        if resume_test:
+            try:
+                validate_local_checkpoint(checkpoint8, task.output)
+            except (FileNotFoundError, ValueError):
+                _run_process(_train_command(args, task, gpu_count, port, stop_after=8), gpus, log)
+        resume = checkpoint8 if resume_test else _latest_checkpoint(task)
+        _run_process(_train_command(args, task, gpu_count, port, resume=resume), gpus, log)
+    except Exception as error:
+        _record_task_failure(task, error, log)
+        raise
     if not _completed(task):
-        raise RuntimeError(f"task did not reach its declared final step: {task.output}")
+        error = RuntimeError(f"task did not reach its declared final step: {task.output}")
+        _record_task_failure(task, error, log)
+        raise error
     _enrich_end_to_end_metrics(task, resume_test)
+
+
+def _record_task_failure(task: Task, error: Exception, log_path: Path) -> None:
+    manifest_path = task.output / "run_manifest.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError:
+            manifest = {}
+    incomplete = []
+    trusted = []
+    for checkpoint in sorted(task.output.glob("checkpoint-*")):
+        if not checkpoint.is_dir():
+            continue
+        try:
+            validate_local_checkpoint(checkpoint, task.output)
+            trusted.append(checkpoint.name)
+        except (FileNotFoundError, ValueError):
+            incomplete.append(checkpoint.name)
+    atomic_json(manifest_path, {
+        **manifest,
+        "status": "failed",
+        "failure_type": type(error).__name__,
+        "failure_message": str(error),
+        "launcher_log": str(log_path),
+        "trusted_checkpoints": trusted,
+        "incomplete_checkpoints": incomplete,
+    })
 
 
 def _enrich_end_to_end_metrics(task: Task, resumed: bool) -> None:
@@ -401,7 +460,7 @@ def run_full(args) -> None:
     selection = json.loads(selection_path.read_text())
     tasks = []
     for seed in args.seeds:
-        for variant in VARIANTS:
+        for variant in args.variants:
             tasks.append(Task(
                 variant, args.output_root / "full" / variant / f"seed_{seed}",
                 selection["learning_rate"], gamma=selection["gamma"], alpha=selection["alpha"],
@@ -444,6 +503,7 @@ def main() -> None:
     parser.add_argument("--gpu-count", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--gpu-ids", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--seeds", type=_parse_seeds, default=(13, 42, 100), help="comma-separated full-run seeds")
+    parser.add_argument("--variants", type=_parse_variants, default=VARIANTS, help="comma-separated full-run variants")
     parser.add_argument("--two-gpu-offload", action="store_true")
     parser.add_argument("--two-gpu-no-offload", action="store_true")
     parser.add_argument("--force-probe", action="store_true", help="repeat an existing two-GPU safety probe")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Any, Literal, Union
 
@@ -9,6 +10,7 @@ from datasets import Dataset, IterableDataset
 from trl import DPOTrainer
 
 from .checkpointing import seal_local_checkpoint, validate_local_checkpoint
+from .distributed_checkpoint import create_checkpoint_process_group, use_checkpoint_process_group
 from .losses import baseline_losses
 
 
@@ -29,6 +31,8 @@ class BaselineDPOTrainer(DPOTrainer):
         self.alpha = float(alpha)
         self.target_epsilon = float(target_epsilon)
         super().__init__(*args, **kwargs)
+        self.checkpoint_process_group = create_checkpoint_process_group()
+        self.checkpoint_metadata_backend = "gloo" if self.checkpoint_process_group is not None else "local"
         self._precomputed_train_ref_log_probs = True
         self._precomputed_eval_ref_log_probs = True
         if self.ref_model is not None:
@@ -50,7 +54,15 @@ class BaselineDPOTrainer(DPOTrainer):
         return dataset
 
     def _save_checkpoint(self, model, trial):
-        super()._save_checkpoint(model, trial)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        with use_checkpoint_process_group(self.checkpoint_process_group):
+            super()._save_checkpoint(model, trial)
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
         if self.is_world_process_zero():
@@ -68,9 +80,15 @@ class BaselineDPOTrainer(DPOTrainer):
         original_guard = transformers_trainer.check_torch_load_is_safe
         transformers_trainer.check_torch_load_is_safe = lambda: None
         try:
-            return super()._load_optimizer_and_scheduler(checkpoint)
+            with use_checkpoint_process_group(self.checkpoint_process_group):
+                return super()._load_optimizer_and_scheduler(checkpoint)
         finally:
             transformers_trainer.check_torch_load_is_safe = original_guard
+
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+        validate_local_checkpoint(Path(resume_from_checkpoint), Path(self.args.output_dir))
+        with use_checkpoint_process_group(self.checkpoint_process_group):
+            return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
 
     def _load_rng_state(self, checkpoint):
         if checkpoint is None:

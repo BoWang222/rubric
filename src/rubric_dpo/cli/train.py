@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -186,6 +187,7 @@ def main() -> None:
             "effective_batch_size": args.per_device_batch_size * args.gradient_accumulation_steps * trainer.accelerator.num_processes,
             "max_steps": args.max_steps,
             "save_checkpoints": not args.no_save,
+            "checkpoint_metadata_backend": trainer.checkpoint_metadata_backend,
             "command": sys.argv,
             "code_root_digest": code_root_digest,
             "source_hashes": source_hashes,
@@ -195,27 +197,44 @@ def main() -> None:
         }
         atomic_json(args.output_dir / "resolved_config.json", resolved)
         atomic_json(args.output_dir / "run_manifest.json", {**resolved, "status": "running"})
-    train_result = trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
-    metrics = dict(train_result.metrics)
-    peak_reserved = torch.tensor(torch.cuda.max_memory_reserved() / (1024 ** 3), device=trainer.args.device)
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(peak_reserved, op=dist.ReduceOp.MAX)
-    metrics["peak_reserved_gb"] = float(peak_reserved.item())
-    metrics["global_step"] = trainer.state.global_step
-    if args.evaluate_after_train and eval_dataset is not None:
-        metrics.update(trainer.evaluate(eval_dataset=eval_dataset, metric_key_prefix=args.eval_split))
-    if trainer.is_world_process_zero():
-        atomic_json(args.output_dir / "metrics.json", metrics)
-        resolved = json.loads((args.output_dir / "resolved_config.json").read_text())
-        expected_final = args.stop_after_step is None and trainer.state.global_step == args.max_steps
-        atomic_json(args.output_dir / "run_manifest.json", {
-            **resolved,
-            "status": "complete" if expected_final else "cleanly_stopped",
-            "global_step": trainer.state.global_step,
-            "peak_reserved_gb": metrics["peak_reserved_gb"],
-            "ref_model_is_none": trainer.ref_model is None,
-        })
-        trainer.save_state()
+    try:
+        train_result = trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
+        metrics = dict(train_result.metrics)
+        peak_reserved = torch.tensor(torch.cuda.max_memory_reserved() / (1024 ** 3), device=trainer.args.device)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(peak_reserved, op=dist.ReduceOp.MAX)
+        metrics["peak_reserved_gb"] = float(peak_reserved.item())
+        metrics["global_step"] = trainer.state.global_step
+        if args.evaluate_after_train and eval_dataset is not None:
+            metrics.update(trainer.evaluate(eval_dataset=eval_dataset, metric_key_prefix=args.eval_split))
+        if trainer.is_world_process_zero():
+            atomic_json(args.output_dir / "metrics.json", metrics)
+            resolved = json.loads((args.output_dir / "resolved_config.json").read_text())
+            expected_final = args.stop_after_step is None and trainer.state.global_step == args.max_steps
+            atomic_json(args.output_dir / "run_manifest.json", {
+                **resolved,
+                "status": "complete" if expected_final else "cleanly_stopped",
+                "global_step": trainer.state.global_step,
+                "peak_reserved_gb": metrics["peak_reserved_gb"],
+                "ref_model_is_none": trainer.ref_model is None,
+            })
+            trainer.save_state()
+    except BaseException as error:
+        if trainer.is_world_process_zero():
+            resolved_path = args.output_dir / "resolved_config.json"
+            resolved = json.loads(resolved_path.read_text()) if resolved_path.exists() else {}
+            atomic_json(args.output_dir / "run_manifest.json", {
+                **resolved,
+                "status": "failed",
+                "global_step": trainer.state.global_step,
+                "failure_type": type(error).__name__,
+                "failure_message": str(error),
+                "traceback": traceback.format_exc(),
+            })
+        raise
+    finally:
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":
