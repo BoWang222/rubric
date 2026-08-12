@@ -14,7 +14,37 @@ from pathlib import Path
 from typing import Any
 
 from rubric_dpo.constants import VARIANTS
+from rubric_dpo.checkpointing import validate_local_checkpoint
 from rubric_dpo.utils import atomic_json, sha256_file
+
+PILOT_STEPS = 64
+FIXED_MMPO_GAMMA = 2.2
+
+
+def _parse_seeds(value: str) -> tuple[int, ...]:
+    try:
+        seeds = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--seeds must be a comma-separated list of integers") from error
+    if not seeds:
+        raise argparse.ArgumentTypeError("--seeds must contain at least one integer")
+    if any(seed < 0 for seed in seeds):
+        raise argparse.ArgumentTypeError("--seeds must contain non-negative integers")
+    if len(set(seeds)) != len(seeds):
+        raise argparse.ArgumentTypeError("--seeds must not contain duplicates")
+    return seeds
+
+
+def _parse_variants(value: str) -> tuple[str, ...]:
+    variants = tuple(item.strip() for item in value.split(",") if item.strip())
+    if not variants:
+        raise argparse.ArgumentTypeError("--variants must contain at least one baseline variant")
+    unknown = set(variants) - set(VARIANTS)
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown baseline variants: {sorted(unknown)}")
+    if len(set(variants)) != len(variants):
+        raise argparse.ArgumentTypeError("--variants must not contain duplicates")
+    return variants
 
 
 @dataclass(frozen=True)
@@ -27,6 +57,7 @@ class Task:
     seed: int = 13
     max_steps: int = 16
     save_steps: int = 8
+    save_checkpoints: bool = True
     evaluate: bool = False
     eval_split: str = "validation"
 
@@ -34,7 +65,12 @@ class Task:
 def _train_command(args, task: Task, gpu_count: int, port: int, stop_after: int | None = None, resume: Path | None = None) -> list[str]:
     config_name = "fsdp_2gpu_cpu_offload.yaml" if gpu_count == 2 and args.two_gpu_offload else f"fsdp_{gpu_count}gpu.yaml"
     fsdp = args.root / "configs/accelerate" / config_name
-    per_device, accumulation = (2, 8) if gpu_count == 4 else (1, 32)
+    batch_contract = {
+        2: (1, 32),
+        4: (2, 8),
+        8: (2, 4),
+    }
+    per_device, accumulation = batch_contract[gpu_count]
     command = [
         str(Path(sys.executable).with_name("accelerate")), "launch", "--config_file", str(fsdp), "--main_process_port", str(port),
         "-m", "rubric_dpo.cli.train",
@@ -49,11 +85,14 @@ def _train_command(args, task: Task, gpu_count: int, port: int, stop_after: int 
         "--gamma", str(task.gamma),
         "--alpha", str(task.alpha),
         "--max-steps", str(task.max_steps),
-        "--save-steps", str(task.save_steps),
         "--per-device-batch-size", str(per_device),
         "--gradient-accumulation-steps", str(accumulation),
         "--logging-steps", "1" if task.max_steps <= 16 else "10",
     ]
+    if task.save_checkpoints:
+        command += ["--save-steps", str(task.save_steps)]
+    else:
+        command += ["--no-save"]
     if task.evaluate:
         command += ["--evaluate-after-train", "--eval-split", task.eval_split]
     if stop_after is not None:
@@ -76,6 +115,10 @@ def _latest_checkpoint(task: Task) -> Path | None:
     for path in task.output.glob("checkpoint-*"):
         match = re.fullmatch(r"checkpoint-(\d+)", path.name)
         if match and path.is_dir() and int(match.group(1)) <= task.max_steps:
+            try:
+                validate_local_checkpoint(path, task.output)
+            except (FileNotFoundError, ValueError):
+                continue
             candidates.append((int(match.group(1)), path))
     return max(candidates, default=(0, None), key=lambda item: item[0])[1]
 
@@ -84,6 +127,8 @@ def _run_process(command: list[str], gpus: str, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpus
+    env.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    env.setdefault("NCCL_DEBUG", "WARN")
     with log_path.open("a", encoding="utf-8") as log:
         log.write("COMMAND " + " ".join(command) + "\n")
         log.flush()
@@ -107,13 +152,52 @@ def _run_task(args, task: Task, gpu_count: int, gpus: str, port: int, resume_tes
         _enrich_end_to_end_metrics(task, resume_test)
         return
     log = task.output / "launcher.log"
-    if resume_test and not (task.output / "checkpoint-8").exists():
-        _run_process(_train_command(args, task, gpu_count, port, stop_after=8), gpus, log)
-    resume = task.output / "checkpoint-8" if resume_test else _latest_checkpoint(task)
-    _run_process(_train_command(args, task, gpu_count, port, resume=resume), gpus, log)
+    try:
+        checkpoint8 = task.output / "checkpoint-8"
+        if resume_test:
+            try:
+                validate_local_checkpoint(checkpoint8, task.output)
+            except (FileNotFoundError, ValueError):
+                _run_process(_train_command(args, task, gpu_count, port, stop_after=8), gpus, log)
+        resume = checkpoint8 if resume_test else _latest_checkpoint(task)
+        _run_process(_train_command(args, task, gpu_count, port, resume=resume), gpus, log)
+    except Exception as error:
+        _record_task_failure(task, error, log)
+        raise
     if not _completed(task):
-        raise RuntimeError(f"task did not reach its declared final step: {task.output}")
+        error = RuntimeError(f"task did not reach its declared final step: {task.output}")
+        _record_task_failure(task, error, log)
+        raise error
     _enrich_end_to_end_metrics(task, resume_test)
+
+
+def _record_task_failure(task: Task, error: Exception, log_path: Path) -> None:
+    manifest_path = task.output / "run_manifest.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError:
+            manifest = {}
+    incomplete = []
+    trusted = []
+    for checkpoint in sorted(task.output.glob("checkpoint-*")):
+        if not checkpoint.is_dir():
+            continue
+        try:
+            validate_local_checkpoint(checkpoint, task.output)
+            trusted.append(checkpoint.name)
+        except (FileNotFoundError, ValueError):
+            incomplete.append(checkpoint.name)
+    atomic_json(manifest_path, {
+        **manifest,
+        "status": "failed",
+        "failure_type": type(error).__name__,
+        "failure_message": str(error),
+        "launcher_log": str(log_path),
+        "trusted_checkpoints": trusted,
+        "incomplete_checkpoints": incomplete,
+    })
 
 
 def _enrich_end_to_end_metrics(task: Task, resumed: bool) -> None:
@@ -139,7 +223,8 @@ def _finalize(task: Task) -> None:
     finalization = task.output / "finalization.json"
     if finalization.exists():
         state = json.loads(finalization.read_text())
-        if state.get("status") == "verified" and state.get("recovery_deleted") is True:
+        recovery_dirs = [path for path in task.output.glob("checkpoint-*") if path.is_dir()]
+        if state.get("status") == "verified" and state.get("recovery_deleted") is True and not recovery_dirs:
             return
     subprocess.run([
         sys.executable, "-m", "rubric_dpo.cli.finalize_run",
@@ -302,36 +387,39 @@ def _selection_key(task: Task, parameter: float) -> tuple[float, float, float]:
 
 def run_pilots(args) -> None:
     pilot_root = args.output_root / "pilots"
-    dpo_tasks = [Task("dpo", pilot_root / f"dpo_lr_{lr:.1e}", lr, max_steps=128, save_steps=128, evaluate=True) for lr in (5e-7, 1e-6)]
+    dpo_tasks = [Task("dpo", pilot_root / f"dpo_lr_{lr:.1e}", lr, max_steps=PILOT_STEPS, save_checkpoints=False, evaluate=True) for lr in (5e-7, 1e-6)]
     for index, task in enumerate(dpo_tasks):
         atomic_json(args.output_root / "pilot_progress.json", {
             "status": "running", "phase": "dpo_lr", "current_run": str(task.output),
-            "completed_runs": index, "total_runs": 8,
+            "completed_runs": index, "total_runs": 5,
         })
         _run_task(args, task, args.gpu_count, _gpu_string(args), 29700 + index)
         _finalize_pilot(task)
     selected_dpo = min(dpo_tasks, key=lambda task: _selection_key(task, task.lr))
     lr = selected_dpo.lr
-    gamma_tasks = [Task("mmpo", pilot_root / f"mmpo_gamma_{value:g}", lr, gamma=value, max_steps=128, save_steps=128, evaluate=True) for value in (1.0, 2.2, 4.0)]
-    alpha_tasks = [Task("odpo_loggap", pilot_root / f"odpo_alpha_{value:g}", lr, alpha=value, max_steps=128, save_steps=128, evaluate=True) for value in (0.1, 0.5, 1.0)]
-    for index, task in enumerate(gamma_tasks + alpha_tasks):
+    alpha_tasks = [Task("odpo_loggap", pilot_root / f"odpo_alpha_{value:g}", lr, alpha=value, max_steps=PILOT_STEPS, save_checkpoints=False, evaluate=True) for value in (0.1, 0.5, 1.0)]
+    for index, task in enumerate(alpha_tasks):
         atomic_json(args.output_root / "pilot_progress.json", {
-            "status": "running", "phase": "mmpo_gamma_or_odpo_alpha", "current_run": str(task.output),
-            "completed_runs": 2 + index, "total_runs": 8,
+            "status": "running", "phase": "odpo_alpha", "current_run": str(task.output),
+            "completed_runs": 2 + index, "total_runs": 5,
         })
         _run_task(args, task, args.gpu_count, _gpu_string(args), 29710 + index)
         _finalize_pilot(task)
-    gamma_task = min(gamma_tasks, key=lambda task: _selection_key(task, task.gamma))
     alpha_task = min(alpha_tasks, key=lambda task: _selection_key(task, task.alpha))
     selection = {
         "status": "frozen_before_test", "learning_rate": lr,
-        "gamma": gamma_task.gamma, "alpha": alpha_task.alpha,
+        "gamma": FIXED_MMPO_GAMMA, "alpha": alpha_task.alpha,
         "selection_metric": "validation hard-preference NLL; accuracy then smaller parameter",
-        "selected_runs": {"dpo": str(selected_dpo.output), "mmpo": str(gamma_task.output), "odpo": str(alpha_task.output)},
+        "fixed_hyperparameters": {
+            "mmpo_gamma": FIXED_MMPO_GAMMA,
+            "source": "MMPO author 8B UltraFeedback recipe",
+            "selected_by_local_pilot": False,
+        },
+        "selected_runs": {"dpo": str(selected_dpo.output), "mmpo": None, "odpo": str(alpha_task.output)},
     }
     atomic_json(args.output_root / "selection.json", selection)
     atomic_json(args.output_root / "pilot_progress.json", {
-        "status": "complete", "completed_runs": 8, "total_runs": 8,
+        "status": "complete", "completed_runs": 5, "total_runs": 5,
         "selection": selection,
     })
 
@@ -370,8 +458,8 @@ def run_full(args) -> None:
         raise RuntimeError("baseline smoke gate is not verified")
     selection = json.loads(selection_path.read_text())
     tasks = []
-    for seed in (13, 42, 100):
-        for variant in VARIANTS:
+    for seed in args.seeds:
+        for variant in args.variants:
             tasks.append(Task(
                 variant, args.output_root / "full" / variant / f"seed_{seed}",
                 selection["learning_rate"], gamma=selection["gamma"], alpha=selection["alpha"],
@@ -403,7 +491,7 @@ def status(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gate-aware four-GPU baseline scheduler")
+    parser = argparse.ArgumentParser(description="Gate-aware multi-GPU baseline scheduler")
     parser.add_argument("phase", choices=("smoke", "probe", "pilots", "full", "status"))
     parser.add_argument("--root", type=Path, default=Path("/root/autodl-tmp/rubric"))
     parser.add_argument("--model", type=Path)
@@ -411,9 +499,12 @@ def main() -> None:
     parser.add_argument("--reference-cache", type=Path)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--parallel", choices=("auto", "off"), default="auto")
-    parser.add_argument("--gpu-count", type=int, choices=(2, 4), default=4)
-    parser.add_argument("--gpu-ids", default="0,1,2,3")
+    parser.add_argument("--gpu-count", type=int, choices=(2, 4, 8), default=4)
+    parser.add_argument("--gpu-ids", default="0,1,2,3,4,5,6,7")
+    parser.add_argument("--seeds", type=_parse_seeds, default=(13, 42, 100), help="comma-separated full-run seeds")
+    parser.add_argument("--variants", type=_parse_variants, default=VARIANTS, help="comma-separated full-run variants")
     parser.add_argument("--two-gpu-offload", action="store_true")
+    parser.add_argument("--two-gpu-no-offload", action="store_true")
     parser.add_argument("--force-probe", action="store_true", help="repeat an existing two-GPU safety probe")
     args = parser.parse_args()
     args.root = args.root.resolve()
@@ -421,8 +512,11 @@ def main() -> None:
     args.dataset_dir = args.dataset_dir or args.root / "data/processed/ultrafeedback/v2/tokens_qwen3_8b_non_thinking"
     args.reference_cache = args.reference_cache or args.root / "data/cache/ultrafeedback_qwen3_8b_ref_v1"
     args.output_root = args.output_root or args.root / "runs/baselines/qwen3_8b_ultrafeedback_margin_consumers_v1"
-    if args.gpu_count == 2 and args.phase in {"smoke", "pilots", "full"} and not args.two_gpu_offload:
-        parser.error("two-GPU full-parameter training requires --two-gpu-offload and a successful smoke")
+    if args.two_gpu_offload and args.two_gpu_no_offload:
+        parser.error("choose exactly one two-GPU memory policy")
+    if args.gpu_count == 2 and args.phase in {"smoke", "pilots", "full"}:
+        if not (args.two_gpu_offload or args.two_gpu_no_offload):
+            parser.error("two-GPU training requires an explicit --two-gpu-offload or --two-gpu-no-offload policy")
     {"smoke": run_smoke, "probe": run_probe, "pilots": run_pilots, "full": run_full, "status": status}[args.phase](args)
 
 

@@ -16,7 +16,8 @@ max_completion_length: 1024
 max_length: 2048
 seeds: [13, 42, 100]
 learning_rate_grid: [5.0e-7, 1.0e-6]
-gamma_grid: [1.0, 2.2, 4.0]
+gamma: 2.2
+gamma_source: mmpo_author_8b_ultrafeedback_recipe
 alpha_grid: [0.1, 0.5, 1.0]
 full_train_steps: 566
 mid_checkpoint_step: 283

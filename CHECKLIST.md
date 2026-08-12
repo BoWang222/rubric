@@ -3,9 +3,41 @@
 ## Identity
 
 - plan: `PLAN.md`
-- stage: four-baseline controlled-UF smoke verified; development pilots pending
+- stage: UltraFeedback baseline smoke/pilots verified; seed-42 DPO full run reached step 283 but failed while writing the first FSDP checkpoint; formal matrix paused for checkpoint-path repair
 - main model: `Qwen/Qwen3-8B`（固定 revision；主轨 `enable_thinking=false`）
-- hardware contract: 4×A800-SXM4-80GB + NVLink；FSDP1 FULL_SHARD；两卡并发探测超过 65GB 安全线，固定回退四卡顺序
+- current hardware contract: NUS shared node, at most 2×H100-80GB concurrently; FSDP1 FULL_SHARD; `per_device=1`, `gradient_accumulation=32`, no CPU offload, sequential jobs only
+
+## 0. 2026-08-12 当前真实进度与下一执行边界
+
+### 已验收，可直接复用
+
+- [x] NUS `rubric` 环境、Qwen3-8B revision、UltraFeedback v2 processed/tokenized data、pair-keyed reference-logp cache 均已就绪
+- [x] DPO/MMPO/ODPO/Scaled-DPO 公式对齐、source-parity tests、4条 1024-pair smoke 和5条 64-step pilot 通过
+- [x] 只用 validation 冻结 `learning_rate=1e-6`、`ODPO alpha=0.5`；MMPO 依作者 8B recipe 固定 `gamma=2.2`
+- [x] seed-42 阶段保持四 baseline 同 pairs/init/order/cache/budget；seeds `13/100` 仅作后续扩展
+
+### 当前 blocker：正式 checkpoint 通路
+
+- [x] DPO seed 42 已从 step 0 稳定训练到 step 283；约 `13.6--14.3s/step`，loss/gradient/throughput 在失败前均 finite
+- [x] 失败点定位为 step-283 FSDP distributed-checkpoint save：rank 1 `NCCL Error 1: unhandled cuda error`
+- [x] 该 `checkpoint-283` 仅有空目录（约 8KB）、无 trusted seal，不可恢复；当前无训练进程，`run_manifest.status=running` 是失败后的陈旧状态
+- [ ] 让 launcher 在子进程失败时原子写 `failed` manifest，`status` 命令明确区分 active/stale/failed/incomplete-checkpoint
+- [ ] 为正式 checkpoint 重试加入 NCCL/CUDA 诊断日志，并只做一次同配置 DPO seed-42 可比重试
+- [x] DPO step-283 失败已定位为 PyTorch DCP 在 NCCL/CUDA 上执行 checkpoint planner 对象通信失败，不是 loss/数据/磁盘/超过两卡政策；改为独立 Gloo/CPU checkpoint metadata process group，训练梯度通信仍使用 NCCL
+- [x] 修复后两卡 save+resume gate 通过：step 1 完整 FSDP model+optimizer+scheduler+RNG checkpoint 约 92GB，trusted seal 通过；从 checkpoint-1 恢复并训练/保存到 step 2 通过
+- [x] launcher 仅恢复带 trusted seal 且 checksum 通过的 checkpoint；残缺 `checkpoint-283` 不再被误认为恢复点，异常后 `run_manifest` 会持久化 `failed`
+- [ ] 仅重跑 DPO seed 42，确认真实 step-283 长训练 checkpoint 通过后，才放行后续 MMPO/ODPO/Scaled DPO
+- [ ] 修复 gate 通过后从 DPO seed 42 重启；因当前无有效 checkpoint，必须从 step 0 重训
+
+### 后续训练波次（严格顺序）
+
+- [ ] Wave 1：完成 UltraFeedback seed-42 四 baseline，每条 566 steps + official-test 本地评测 + BF16 merge/finalize
+- [ ] Wave 2：汇总四 baseline 的 test NLL/accuracy/reward margin/policy-reference KL/length；不用 test 反向改超参
+- [ ] Wave 3：冻结 UltraFeedback 四维 canonical rubric 和 RubricARROW scorer，生成 500-prompt×16 response calibration bank，计算 `s_UF` + bootstrap CI
+- [ ] Wave 4：先冻结 Wasserstein-W1 ground cost/rho normalization/solver 合同，再实现 KL 与 Wasserstein backends；通过 `rho=0`、`s=1`、explicit-inner 单测与 1k smoke
+- [ ] Wave 5：在 validation 上只用 uniform control 选择一次全局 `rho`，然后运行 UltraFeedback nominal/uniform/KL-ours/W1-ours seed 42
+- [ ] Wave 6：完成 WildChecklists/HelpSteer2 production data pipeline 与 baseline smoke；再开始其单-seed 训练
+- [ ] Wave 7：只在原生与 automatic-rubric validity gates 通过后，才补 seeds `13/100` 和扩展 automatic-producer 矩阵
 
 ## A. 冻结研究合同
 
@@ -28,6 +60,7 @@
 - [x] 创建并冻结 conda environment
 - [x] 记录 Python/PyTorch/CUDA/driver/package versions
 - [x] 收集并记录 TRL 与 baseline repositories 的 exact commits
+- [x] NUS 已同步九个只读 refs：OpenJudge `2151def`、RUBRIC-ARROW `d116811`、DPO `f8b8c0f`、EvoLM `207cf7e`、MMPO `ef3a91d`、ODPO `6152f67`、OpenRubrics `1a40c14`、RLCF `73254b6`、TRL `accf7383`
 - [x] 记录 DPO/MMPO/ODPO 作者代码状态；HelpSteer2-Preference 含 Scaled DPO 公式与实验，但无独立官方 trainer；UF 行标 `Scaled-DPO normalized-gap transfer`
 - [ ] 冻结 OpenRubrics、Rubric-ARM、EvoLM 官方代码/权重 commit
 - [ ] 冻结 Auto-Rubric official data revision 与 RM-Gallery/OpenJudge 通用框架 revision；记录尚未验证该框架含论文完整 Propose--Evaluate--Revise/Theme--Tips pipeline，且无已确认的论文生成 checkpoint
@@ -47,7 +80,7 @@
 
 ## C. Loss 与数值正确性
 
-- [x] Vanilla DPO 与 TRL 公式 FP64 对齐（GPU cached-vs-online gate 待 reference cache 完成）
+- [x] Vanilla DPO 与 TRL 公式 FP64 对齐，GPU cached-vs-online reference-logp gate 已通过
 - [x] MMPO 与作者公式/实现 FP64 对齐
 - [x] ODPO author log-gap 公式对齐且 `alpha=0` 退化测试通过
 - [x] Scaled-DPO normalized-gap transfer unit-weight 与 native 1:2:3 退化测试通过
@@ -69,16 +102,21 @@
 - [x] 下载并冻结 `HuggingFaceH4/ultrafeedback_binarized` revision；验证 train_prefs=61,135、test_prefs=2,000 与 `prompt_id`
 - [x] 对齐 UltraFeedback pair 与 4-aspect scores；最终 train/validation/test=36,258/2,000/1,228
 - [x] 验证 raw revision 已含官方 2023-12-29 `overall_score` 修复；four-aspect 重算、overall audit-only、train-only q95=3.5
-- [ ] 下载 WildChecklists 51,071-row HF release；严格验证 `prompt/chosen/rejected/chosen_score/rejected_score/requirements`，不得虚构 criterion-score 列
+- [x] 下载并验证 WildChecklists revision `f4175828...`：51,071 rows，schema 为 `prompt/chosen/rejected/chosen_score/rejected_score/requirements`，无 criterion-score 列
+- [ ] 为 WildChecklists 冻结 calibration/train/validation/test IDs、aggregate-gap normalization、Qwen3 tokens 与 reference-logp cache
 - [ ] 若用 RLCF 仓另行链接的 criterion-level/scoring intermediates，单独冻结 revision/checksum
-- [ ] 下载 HelpSteer2 21,362 ratings 与 `preference/preference.jsonl.gz`；验证 preference 最终 7,118 pairs（6,766/352）及 strength 仅 ±1/±2/±3；冻结完整五维标注指南
+- [x] 下载并验证 HelpSteer2 revision `990b2711...`：21,362 ratings（20,324/1,038）；preference 9,125 rows，去除 2,007 zero-strength 后为 6,766/352，strength 仅 `-3..3`
+- [ ] 冻结 HelpSteer2 完整五维 guidance/hash，生成 structured-feedback 主轨 processed splits/tokens/reference cache
 - [ ] 从 WildChecklists 官方 release 按固定 hash 先留出 500 prompts 作九-system common calibration，并从政策训练中移除
+- [x] 下载 WildChat-1M revision `7d6490e4...` 全14个 parquet shards；尚未生成项目 splits
 - [ ] 固定 WildChat 4k train / 500 val + 500 OnlineRubrics induction split；不再另造 WildChat calibration；扩容只能在全量训练前统一预注册
-- [ ] 下载 Auto-Rubric official HelpSteer3-derived data 与 OpenRubric-v2，作为 method-native artifact checks
+- [x] 下载 Auto-Rubric revision `2a5e18a3...` official data（38,459 rows）与 OpenRubric-v2 revision `d1048e9e...`（74,214 rows）
+- [ ] 完成 Auto-Rubric/OpenRubric-v2 method-native schema/provenance checks；不将它们直接当成 common controlled training corpus
 - [ ] 从 Auto-Rubric 论文 Appendix K 转录并双人/双解析校验 HelpSteer3-source global Theme--Tips rubric
 - [ ] 记录 OnlineRubrics Generalist/Expert data unavailable；不得创建虚假的原始 dataset manifest
 - [ ] 冻结 Tulu-3 preference-mixture revision 作为 EvoLM provenance；不要求重训完整 co-evolution
-- [ ] 下载 JudgmentBench，验证 expert rubric 与 comparative judgment joins
+- [x] 下载 JudgmentBench revision `945ff52f...`：30 tasks、457 rubric items、2,274 outputs、1,530 comparative judgments、1,539 rubric annotations
+- [ ] 验证 JudgmentBench expert rubric/comparative-judgment joins 与去重；仅作 independent diagnostic
 - [ ] 对全部 splits 和 evaluation prompts 做去重
 - [x] 保存 UltraFeedback 数据过滤、quarantine、split 与 margin normalization manifests
 - [x] UltraFeedback 只用 train raw positive gaps 的 NumPy `quantile(method="linear")` 冻结 `q95_g=3.5`；val/test 复用 train q95 与 `mu_train`
@@ -114,8 +152,15 @@
 ## F. UltraFeedback native 主实验
 
 - [x] 1024-pair baseline smoke：DPO/MMPO/ODPO/Scaled-DPO 全部 16 steps 通过；DPO step-8 resume 通过；状态 `verified-for-controlled-UF`
-- [ ] 128-step development pilots：DPO LR → MMPO gamma → ODPO alpha，只用 validation 冻结全局配置
-- [ ] 四 baseline × seeds 13/42/100 的 566-step 全量 UltraFeedback 训练与本地评测
+- [x] 64-step development pilots：5/5 完成，只用 validation 冻结 `learning_rate=1e-6`、`ODPO alpha=0.5`；MMPO gamma 按作者8B UltraFeedback recipe固定为 `2.2`
+- [x] NUS 服务器合规双卡 pilot 配置：`per_device=1`、`gradient_accumulation=32`、effective batch `64`、FSDP no-offload；8-step实测 `13.7s/step`、peak reserved `77.37GB/GPU`。`per_device=2` + CPU offload 实测更慢（`67.1s/step`），不采用
+- [x] NUS 双卡 no-offload checkpoint gate：step 1 保存、恢复到 step 2、最终 BF16 合并与 recovery cleanup 均通过；单 checkpoint 约 `92GB`，合并后约 `16GB`
+- [ ] 第一阶段：seed `42` 上的四 baseline，每条 566-step 全量 UltraFeedback 训练与 official-test 本地评测
+- [ ] DPO seed 42：第一次尝试在 step 283 checkpoint 失败；修复 checkpoint 通路后从 step 0 重启
+- [ ] MMPO seed 42：未启动
+- [ ] ODPO seed 42：未启动
+- [ ] Scaled-DPO normalized-gap transfer seed 42：未启动
+- [ ] 第二阶段：资源允许时补 seeds `13/100`，升级为预注册的三 seed 主表；单 seed 结果不报种子方差
 - [ ] Gate 0 通过后，在 UltraFeedback development split 仅用 uniform robust 网格选择一次全局 `rho`；立即冻结，ours/其他数据/consumer 不重调
 - [ ] 单 seed：Vanilla DPO
 - [ ] 单 seed：MMPO nominal/uniform/ours
