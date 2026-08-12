@@ -23,7 +23,10 @@
 - [x] 该 `checkpoint-283` 仅有空目录（约 8KB）、无 trusted seal，不可恢复；当前无训练进程，`run_manifest.status=running` 是失败后的陈旧状态
 - [ ] 让 launcher 在子进程失败时原子写 `failed` manifest，`status` 命令明确区分 active/stale/failed/incomplete-checkpoint
 - [ ] 为正式 checkpoint 重试加入 NCCL/CUDA 诊断日志，并只做一次同配置 DPO seed-42 可比重试
-- [ ] 若同一失败在 checkpoint 再现，停止盲目重跑；改用更快/可恢复的 checkpoint staging 方案后先做 save+resume gate，不改 optimizer、batch、steps 或数据合同
+- [x] DPO step-283 失败已定位为 PyTorch DCP 在 NCCL/CUDA 上执行 checkpoint planner 对象通信失败，不是 loss/数据/磁盘/超过两卡政策；改为独立 Gloo/CPU checkpoint metadata process group，训练梯度通信仍使用 NCCL
+- [x] 修复后两卡 save+resume gate 通过：step 1 完整 FSDP model+optimizer+scheduler+RNG checkpoint 约 92GB，trusted seal 通过；从 checkpoint-1 恢复并训练/保存到 step 2 通过
+- [x] launcher 仅恢复带 trusted seal 且 checksum 通过的 checkpoint；残缺 `checkpoint-283` 不再被误认为恢复点，异常后 `run_manifest` 会持久化 `failed`
+- [ ] 仅重跑 DPO seed 42，确认真实 step-283 长训练 checkpoint 通过后，才放行后续 MMPO/ODPO/Scaled DPO
 - [ ] 修复 gate 通过后从 DPO seed 42 重启；因当前无有效 checkpoint，必须从 step 0 重训
 
 ### 后续训练波次（严格顺序）
