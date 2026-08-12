@@ -27,6 +27,7 @@ class Task:
     seed: int = 13
     max_steps: int = 16
     save_steps: int = 8
+    save_checkpoints: bool = True
     evaluate: bool = False
     eval_split: str = "validation"
 
@@ -54,11 +55,14 @@ def _train_command(args, task: Task, gpu_count: int, port: int, stop_after: int 
         "--gamma", str(task.gamma),
         "--alpha", str(task.alpha),
         "--max-steps", str(task.max_steps),
-        "--save-steps", str(task.save_steps),
         "--per-device-batch-size", str(per_device),
         "--gradient-accumulation-steps", str(accumulation),
         "--logging-steps", "1" if task.max_steps <= 16 else "10",
     ]
+    if task.save_checkpoints:
+        command += ["--save-steps", str(task.save_steps)]
+    else:
+        command += ["--no-save"]
     if task.evaluate:
         command += ["--evaluate-after-train", "--eval-split", task.eval_split]
     if stop_after is not None:
@@ -307,7 +311,7 @@ def _selection_key(task: Task, parameter: float) -> tuple[float, float, float]:
 
 def run_pilots(args) -> None:
     pilot_root = args.output_root / "pilots"
-    dpo_tasks = [Task("dpo", pilot_root / f"dpo_lr_{lr:.1e}", lr, max_steps=128, save_steps=128, evaluate=True) for lr in (5e-7, 1e-6)]
+    dpo_tasks = [Task("dpo", pilot_root / f"dpo_lr_{lr:.1e}", lr, max_steps=128, save_checkpoints=False, evaluate=True) for lr in (5e-7, 1e-6)]
     for index, task in enumerate(dpo_tasks):
         atomic_json(args.output_root / "pilot_progress.json", {
             "status": "running", "phase": "dpo_lr", "current_run": str(task.output),
@@ -317,8 +321,8 @@ def run_pilots(args) -> None:
         _finalize_pilot(task)
     selected_dpo = min(dpo_tasks, key=lambda task: _selection_key(task, task.lr))
     lr = selected_dpo.lr
-    gamma_tasks = [Task("mmpo", pilot_root / f"mmpo_gamma_{value:g}", lr, gamma=value, max_steps=128, save_steps=128, evaluate=True) for value in (1.0, 2.2, 4.0)]
-    alpha_tasks = [Task("odpo_loggap", pilot_root / f"odpo_alpha_{value:g}", lr, alpha=value, max_steps=128, save_steps=128, evaluate=True) for value in (0.1, 0.5, 1.0)]
+    gamma_tasks = [Task("mmpo", pilot_root / f"mmpo_gamma_{value:g}", lr, gamma=value, max_steps=128, save_checkpoints=False, evaluate=True) for value in (1.0, 2.2, 4.0)]
+    alpha_tasks = [Task("odpo_loggap", pilot_root / f"odpo_alpha_{value:g}", lr, alpha=value, max_steps=128, save_checkpoints=False, evaluate=True) for value in (0.1, 0.5, 1.0)]
     for index, task in enumerate(gamma_tasks + alpha_tasks):
         atomic_json(args.output_root / "pilot_progress.json", {
             "status": "running", "phase": "mmpo_gamma_or_odpo_alpha", "current_run": str(task.output),

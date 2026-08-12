@@ -37,6 +37,21 @@ def test_eight_gpu_command_preserves_effective_batch_64(tmp_path: Path) -> None:
     assert command[accumulation + 1] == "4"
 
 
+def test_metrics_only_pilot_disables_checkpoint_saves(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        root=tmp_path,
+        model=tmp_path / "model",
+        dataset_dir=tmp_path / "dataset",
+        reference_cache=tmp_path / "cache",
+        two_gpu_offload=False,
+    )
+    task = Task("dpo", tmp_path / "pilot", 5e-7, max_steps=128, save_checkpoints=False, evaluate=True)
+    command = _train_command(args, task, gpu_count=4, port=29700)
+    assert "--no-save" in command
+    assert "--save-steps" not in command
+    assert "--evaluate-after-train" in command
+
+
 def test_pilot_finalization_keeps_metrics_and_removes_recovery(tmp_path: Path) -> None:
     output = tmp_path / "pilot"
     checkpoint = output / "checkpoint-128"

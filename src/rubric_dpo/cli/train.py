@@ -72,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--per-device-batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--save-steps", type=int, default=283)
+    parser.add_argument("--no-save", action="store_true")
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--evaluate-after-train", action="store_true")
     parser.add_argument("--eval-split", choices=("validation", "test"), default="validation")
@@ -138,7 +139,7 @@ def main() -> None:
         data_seed=args.seed,
         remove_unused_columns=False,
         eval_strategy="no",
-        save_strategy="steps",
+        save_strategy="no" if args.no_save else "steps",
         save_steps=args.save_steps,
         save_total_limit=2,
         save_only_model=False,
@@ -184,6 +185,7 @@ def main() -> None:
             "alpha": args.alpha,
             "effective_batch_size": args.per_device_batch_size * args.gradient_accumulation_steps * trainer.accelerator.num_processes,
             "max_steps": args.max_steps,
+            "save_checkpoints": not args.no_save,
             "command": sys.argv,
             "code_root_digest": code_root_digest,
             "source_hashes": source_hashes,
