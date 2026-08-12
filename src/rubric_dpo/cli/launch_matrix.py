@@ -16,6 +16,9 @@ from typing import Any
 from rubric_dpo.constants import VARIANTS
 from rubric_dpo.utils import atomic_json, sha256_file
 
+PILOT_STEPS = 64
+FIXED_MMPO_GAMMA = 2.2
+
 
 @dataclass(frozen=True)
 class Task:
@@ -36,7 +39,7 @@ def _train_command(args, task: Task, gpu_count: int, port: int, stop_after: int 
     config_name = "fsdp_2gpu_cpu_offload.yaml" if gpu_count == 2 and args.two_gpu_offload else f"fsdp_{gpu_count}gpu.yaml"
     fsdp = args.root / "configs/accelerate" / config_name
     batch_contract = {
-        2: (1, 32),
+        2: (2, 16),
         4: (2, 8),
         8: (2, 4),
     }
@@ -311,36 +314,39 @@ def _selection_key(task: Task, parameter: float) -> tuple[float, float, float]:
 
 def run_pilots(args) -> None:
     pilot_root = args.output_root / "pilots"
-    dpo_tasks = [Task("dpo", pilot_root / f"dpo_lr_{lr:.1e}", lr, max_steps=128, save_checkpoints=False, evaluate=True) for lr in (5e-7, 1e-6)]
+    dpo_tasks = [Task("dpo", pilot_root / f"dpo_lr_{lr:.1e}", lr, max_steps=PILOT_STEPS, save_checkpoints=False, evaluate=True) for lr in (5e-7, 1e-6)]
     for index, task in enumerate(dpo_tasks):
         atomic_json(args.output_root / "pilot_progress.json", {
             "status": "running", "phase": "dpo_lr", "current_run": str(task.output),
-            "completed_runs": index, "total_runs": 8,
+            "completed_runs": index, "total_runs": 5,
         })
         _run_task(args, task, args.gpu_count, _gpu_string(args), 29700 + index)
         _finalize_pilot(task)
     selected_dpo = min(dpo_tasks, key=lambda task: _selection_key(task, task.lr))
     lr = selected_dpo.lr
-    gamma_tasks = [Task("mmpo", pilot_root / f"mmpo_gamma_{value:g}", lr, gamma=value, max_steps=128, save_checkpoints=False, evaluate=True) for value in (1.0, 2.2, 4.0)]
-    alpha_tasks = [Task("odpo_loggap", pilot_root / f"odpo_alpha_{value:g}", lr, alpha=value, max_steps=128, save_checkpoints=False, evaluate=True) for value in (0.1, 0.5, 1.0)]
-    for index, task in enumerate(gamma_tasks + alpha_tasks):
+    alpha_tasks = [Task("odpo_loggap", pilot_root / f"odpo_alpha_{value:g}", lr, alpha=value, max_steps=PILOT_STEPS, save_checkpoints=False, evaluate=True) for value in (0.1, 0.5, 1.0)]
+    for index, task in enumerate(alpha_tasks):
         atomic_json(args.output_root / "pilot_progress.json", {
-            "status": "running", "phase": "mmpo_gamma_or_odpo_alpha", "current_run": str(task.output),
-            "completed_runs": 2 + index, "total_runs": 8,
+            "status": "running", "phase": "odpo_alpha", "current_run": str(task.output),
+            "completed_runs": 2 + index, "total_runs": 5,
         })
         _run_task(args, task, args.gpu_count, _gpu_string(args), 29710 + index)
         _finalize_pilot(task)
-    gamma_task = min(gamma_tasks, key=lambda task: _selection_key(task, task.gamma))
     alpha_task = min(alpha_tasks, key=lambda task: _selection_key(task, task.alpha))
     selection = {
         "status": "frozen_before_test", "learning_rate": lr,
-        "gamma": gamma_task.gamma, "alpha": alpha_task.alpha,
+        "gamma": FIXED_MMPO_GAMMA, "alpha": alpha_task.alpha,
         "selection_metric": "validation hard-preference NLL; accuracy then smaller parameter",
-        "selected_runs": {"dpo": str(selected_dpo.output), "mmpo": str(gamma_task.output), "odpo": str(alpha_task.output)},
+        "fixed_hyperparameters": {
+            "mmpo_gamma": FIXED_MMPO_GAMMA,
+            "source": "MMPO author 8B UltraFeedback recipe",
+            "selected_by_local_pilot": False,
+        },
+        "selected_runs": {"dpo": str(selected_dpo.output), "mmpo": None, "odpo": str(alpha_task.output)},
     }
     atomic_json(args.output_root / "selection.json", selection)
     atomic_json(args.output_root / "pilot_progress.json", {
-        "status": "complete", "completed_runs": 8, "total_runs": 8,
+        "status": "complete", "completed_runs": 5, "total_runs": 5,
         "selection": selection,
     })
 

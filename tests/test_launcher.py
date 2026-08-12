@@ -52,6 +52,23 @@ def test_metrics_only_pilot_disables_checkpoint_saves(tmp_path: Path) -> None:
     assert "--evaluate-after-train" in command
 
 
+def test_two_gpu_cpu_offload_command_preserves_effective_batch_64(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        root=tmp_path,
+        model=tmp_path / "model",
+        dataset_dir=tmp_path / "dataset",
+        reference_cache=tmp_path / "cache",
+        two_gpu_offload=True,
+    )
+    task = Task("dpo", tmp_path / "pilot", 5e-7, max_steps=64, save_checkpoints=False, evaluate=True)
+    command = _train_command(args, task, gpu_count=2, port=29700)
+    assert str(tmp_path / "configs/accelerate/fsdp_2gpu_cpu_offload.yaml") in command
+    per_device = command.index("--per-device-batch-size")
+    accumulation = command.index("--gradient-accumulation-steps")
+    assert command[per_device + 1] == "2"
+    assert command[accumulation + 1] == "16"
+
+
 def test_pilot_finalization_keeps_metrics_and_removes_recovery(tmp_path: Path) -> None:
     output = tmp_path / "pilot"
     checkpoint = output / "checkpoint-128"
